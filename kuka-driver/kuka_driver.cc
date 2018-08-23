@@ -1,5 +1,6 @@
 
-#include "poll.h"
+#include <poll.h>
+#include <sys/time.h>
 
 #include <cassert>
 #include <cmath>
@@ -36,6 +37,12 @@ const double kJointLimitSafetyMarginDegree = 1;
 const double kJointTorqueSafetyMarginNm = 60;
 const double kJointTorqueSafetyMarginScale[kNumJoints] = {1, 1, 1, 0.5,
                                                           0.2, 0.2, 0.1};
+
+// How long to want between the first time we have data to publish over LCM
+// and when we start publishing.  This is intended to be a guard time to make
+// sure nothing has started sendign command packets before the current
+// position of the robot could be known.
+const int64_t kStatusPublishGuardUs = 250000;
 
 double ToRadians(double degrees) {
   return degrees * M_PI / 180.;
@@ -301,6 +308,19 @@ class KukaLCMClient  {
   }
 
   void PublishStateUpdate() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t now = (tv.tv_sec * 1000000) + tv.tv_usec;
+
+    if (first_publish_attempt_us_ < 0) {
+      first_publish_attempt_us_ = now;
+    }
+
+    if (now - first_publish_attempt_us_ < kStatusPublishGuardUs) {
+      command_started_ = false;
+    } else {
+      command_started_ = true;
+    }
     lcm_.publish(FLAGS_lcm_status_channel, &lcm_status_);
   }
 
@@ -308,6 +328,10 @@ class KukaLCMClient  {
   void HandleCommandMessage(const lcm::ReceiveBuffer* rbuf,
                             const std::string& chan,
                             const lcmt_iiwa_command* command) {
+    if (!command_started_) {
+      throw std::runtime_error("First command received within guard time.  "
+                               "Aborting.");
+    }
     lcm_command_ = *command;
   }
 
@@ -321,6 +345,11 @@ class KukaLCMClient  {
   // Filters
   std::vector<DiscreteTimeLowPassFilter<double>> vel_filters_;
   std::vector<int64_t> utime_last_;
+
+  // Implement a guard against receiving commands which are unlikely to be
+  // valid on startup.
+  int64_t first_publish_attempt_us_{-1};
+  bool command_started_{false};
 };
 
 class KukaFRIClient : public KUKA::FRI::LBRClient {
